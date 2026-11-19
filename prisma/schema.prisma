@@ -1,0 +1,279 @@
+// Agendente — SaaS de agenda e atendimento via WhatsApp para clínicas odontológicas
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+enum WaProvider {
+  SIMULATOR
+  CLOUD
+  EVOLUTION
+}
+
+enum BotMode {
+  AI
+  MENU
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  COMPLETED
+  CANCELED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  BOT
+  AI
+  STAFF
+}
+
+enum ConversationStatus {
+  BOT
+  HUMAN
+  CLOSED
+}
+
+enum Channel {
+  WHATSAPP
+  SIMULATOR
+}
+
+enum Direction {
+  IN
+  OUT
+}
+
+enum Sender {
+  PATIENT
+  BOT
+  STAFF
+  SYSTEM
+}
+
+enum MessageStatus {
+  RECEIVED
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model Clinic {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  phone          String?
+  address        String?
+  infoText       String?  @db.Text
+  timezone       String   @default("America/Sao_Paulo")
+  slotStepMin    Int      @default(30)
+  minNoticeHours Int      @default(2)
+  maxDaysAhead   Int      @default(60)
+
+  plan        String    @default("trial")
+  trialEndsAt DateTime?
+
+  // WhatsApp
+  waProvider          WaProvider @default(SIMULATOR)
+  waPhoneNumberId     String?    @unique
+  waAccessToken       String?
+  waBusinessAccountId String?
+  evoBaseUrl          String?
+  evoInstance         String?
+  evoApiKey           String?
+  webhookSecret       String     @unique @default(cuid())
+
+  // Assistente
+  botEnabled      Boolean @default(true)
+  botMode         BotMode @default(MENU)
+  botName         String  @default("Sofia")
+  botInstructions String? @db.Text
+  humanTimeoutHours Int   @default(12)
+
+  // Automações (ver src/lib/automations/settings.ts)
+  automations Json @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  dentists      Dentist[]
+  procedures    Procedure[]
+  patients      Patient[]
+  appointments  Appointment[]
+  timeOffs      TimeOff[]
+  conversations Conversation[]
+  messages      Message[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  clinicId     String
+  clinic       Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(STAFF)
+  /// Data em que aceitou os Termos de uso e a Política de privacidade (prova do aceite, LGPD)
+  termsAcceptedAt DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([clinicId])
+}
+
+model Dentist {
+  id           String        @id @default(cuid())
+  clinicId     String
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  name         String
+  specialty    String?
+  cro          String?
+  color        String        @default("#0d9488")
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  workingHours WorkingHour[]
+  procedures   Procedure[]
+  appointments Appointment[]
+  timeOffs     TimeOff[]
+
+  @@index([clinicId])
+}
+
+/// weekday: 1 = segunda ... 7 = domingo (padrão ISO / Luxon)
+model WorkingHour {
+  id        String  @id @default(cuid())
+  dentistId String
+  dentist   Dentist @relation(fields: [dentistId], references: [id], onDelete: Cascade)
+  weekday   Int
+  start     String // "08:00"
+  end       String // "12:00"
+
+  @@index([dentistId])
+}
+
+model Procedure {
+  id           String        @id @default(cuid())
+  clinicId     String
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  name         String
+  durationMin  Int
+  priceCents   Int?
+  description  String?
+  active       Boolean       @default(true)
+  sortOrder    Int           @default(0)
+  dentists     Dentist[]
+  appointments Appointment[]
+
+  @@index([clinicId])
+}
+
+model Patient {
+  id               String         @id @default(cuid())
+  clinicId         String
+  clinic           Clinic         @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  name             String?
+  phone            String // somente dígitos, com DDI (ex.: 5511999998888)
+  email            String?
+  birthDate        DateTime?      @db.Date
+  notes            String?        @db.Text
+  optOut           Boolean        @default(false)
+  lastRecallAt     DateTime?
+  lastBirthdayYear Int?
+  createdAt        DateTime       @default(now())
+  appointments     Appointment[]
+  conversations    Conversation[]
+
+  @@unique([clinicId, phone])
+}
+
+model Appointment {
+  id            String            @id @default(cuid())
+  clinicId      String
+  clinic        Clinic            @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  patientId     String
+  patient       Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  dentistId     String
+  dentist       Dentist           @relation(fields: [dentistId], references: [id], onDelete: Cascade)
+  procedureId   String
+  procedure     Procedure         @relation(fields: [procedureId], references: [id], onDelete: Restrict)
+  start         DateTime
+  end           DateTime
+  status        AppointmentStatus @default(SCHEDULED)
+  source        AppointmentSource @default(STAFF)
+  notes         String?           @db.Text
+  reminder24hAt DateTime?
+  reminder2hAt  DateTime?
+  followupAt    DateTime?
+  rating        Int?
+  canceledAt    DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([clinicId, start])
+  @@index([dentistId, start])
+  @@index([patientId])
+}
+
+/// Bloqueio de agenda. dentistId nulo = clínica inteira (feriado, recesso).
+model TimeOff {
+  id        String   @id @default(cuid())
+  clinicId  String
+  clinic    Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  dentistId String?
+  dentist   Dentist? @relation(fields: [dentistId], references: [id], onDelete: Cascade)
+  start     DateTime
+  end       DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([clinicId, start])
+}
+
+model Conversation {
+  id            String             @id @default(cuid())
+  clinicId      String
+  clinic        Clinic             @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  patientId     String
+  patient       Patient            @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  channel       Channel            @default(WHATSAPP)
+  status        ConversationStatus @default(BOT)
+  botState      Json?
+  unread        Int                @default(0)
+  lastMessageAt DateTime           @default(now())
+  lastInboundAt DateTime?
+  createdAt     DateTime           @default(now())
+  messages      Message[]
+
+  @@unique([clinicId, patientId])
+  @@index([clinicId, lastMessageAt])
+}
+
+model Message {
+  id             String        @id @default(cuid())
+  clinicId       String
+  clinic         Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  direction      Direction
+  sender         Sender
+  body           String        @db.Text
+  waMessageId    String?       @unique
+  status         MessageStatus @default(PENDING)
+  error          String?
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([clinicId, createdAt])
+}
